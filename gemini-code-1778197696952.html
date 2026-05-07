@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zombie Survivor: Hardcore Edition</title>
+    <style>
+        body { margin: 0; background: #0a0a0a; color: white; font-family: 'Courier New', monospace; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { background: #111; border: 3px solid #444; cursor: crosshair; image-rendering: pixelated; }
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 5; }
+        .stats { font-size: 18px; margin-bottom: 5px; text-shadow: 2px 2px #000; color: #cc0000; font-weight: bold; }
+        #msg { 
+            position: absolute; width: 100%; text-align: center; 
+            font-size: 42px; color: #ff3333; top: 30%; 
+            display: none; text-shadow: 0 0 20px #ff0000; 
+            font-weight: bold; z-index: 10; pointer-events: none;
+        }
+        #hp-container { width: 180px; height: 16px; background: #222; border: 2px solid #fff; margin-bottom: 10px; }
+        #hp-bar { width: 100%; height: 100%; transition: width 0.1s ease-out; }
+        #upgrade-menu {
+            position: absolute; display: none; flex-direction: column; gap: 15px;
+            background: rgba(10,10,10,0.98); padding: 30px; border: 2px solid #ff3333; border-radius: 5px; text-align: center; z-index: 20;
+        }
+        .up-btn { background: #1a1a1a; color: #ff3333; border: 1px solid #ff3333; padding: 15px 30px; cursor: pointer; font-family: 'Courier New', monospace; font-size: 16px; font-weight: bold; }
+        .up-btn:hover { background: #ff3333; color: black; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="hp-container"><div id="hp-bar"></div></div>
+        <div class="stats">INTEGRITY: <span id="hpText">100</span>%</div>
+        <div class="stats">WAVE: <span id="waveNo">1</span></div>
+        <div class="stats">SCORE: <span id="score">0</span></div>
+    </div>
+
+    <div id="msg">WAVE COMPLETE</div>
+
+    <div id="upgrade-menu">
+        <h2 style="color: #ff3333; margin-top: 0;">SELECT AUGMENTATION</h2>
+        <button class="up-btn" onclick="applyUpgrade('range')">OPTIC SENSOR (+Range)</button>
+        <button class="up-btn" onclick="applyUpgrade('damage')">KINETIC COILS (+Damage)</button>
+        <button class="up-btn" onclick="applyUpgrade('speed')">RAPID COOLING (-Cooldown)</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const hpBar = document.getElementById('hp-bar');
+        const hpText = document.getElementById('hpText');
+        const msgEl = document.getElementById('msg');
+        
+        const spriteSheet = new Image();
+        spriteSheet.src = 'https://r.jina.ai/i/107f9754406a4401824314777f9f3f4c';
+        let spritesLoaded = false;
+        spriteSheet.onload = () => { spritesLoaded = true; };
+
+        canvas.width = window.innerWidth * 0.95;
+        canvas.height = window.innerHeight * 0.9;
+
+        let score = 0, wave = 1, gameActive = true, paused = false, lastShot = 0;
+        const keys = {};
+        let gun = { fireRate: 380, bulletSpeed: 14, range: 400, damage: 10 }; // Slower fire rate, less range
+        const player = { x: canvas.width / 2, y: canvas.height / 2, radius: 20, barrelAngle: 0, hp: 100, speed: 4 }; // Speed reduced to 4
+        const crate = { x: 0, y: 0, active: false };
+        let bullets = [], zombies = [];
+
+        const sprites = {
+            normal: { sx: 30, sy: 100, sw: 100, sh: 120, color: '#27ae60' },
+            fast:   { sx: 530, sy: 140, sw: 80, sh: 80, color: '#2980b9' },
+            fat:    { sx: 30, sy: 540, sw: 150, sh: 150, color: '#c0392b' },
+            boss:   { sx: 510, sy: 510, sw: 200, sh: 200, color: '#8e44ad' }
+        };
+
+        window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code === "Space") e.preventDefault(); });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        function applyUpgrade(type) {
+            if (type === 'range') gun.range += 40;
+            if (type === 'damage') gun.damage += 3;
+            if (type === 'speed') gun.fireRate *= 0.88;
+            document.getElementById('upgrade-menu').style.display = 'none';
+            paused = false; wave++;
+            document.getElementById('waveNo').innerText = wave;
+            player.hp = Math.min(100, player.hp + 25); // Heals less per wave
+            startWave();
+        }
+
+        function spawnZombie(isBossSummon = false) {
+            // Difficulty scaling: HP increases by 8 per wave instead of 5
+            let type = { label: 'normal', hp: 40 + (wave * 8), speed: 1.4 + (wave * 0.05), damage: 10, radius: 25 };
+            
+            if (isBossSummon) {
+                type = { label: 'fast', hp: 30, speed: 3.8, damage: 5, radius: 18 };
+            } else {
+                const rand = Math.random();
+                if (rand < 0.25) type = { label: 'fat', hp: 300 + (wave * 15), speed: 0.9 + (wave * 0.02), damage: 20, radius: 40 };
+                else if (rand < 0.45) type = { label: 'fast', hp: 25, speed: 3.5 + (wave * 0.05), damage: 6, radius: 18 };
+            }
+            
+            let side = Math.floor(Math.random() * 4);
+            let x, y;
+            if (side === 0) { x = Math.random() * canvas.width; y = -100; }
+            else if (side === 1) { x = canvas.width + 100; y = Math.random() * canvas.height; }
+            else if (side === 2) { x = Math.random() * canvas.width; y = canvas.height + 100; }
+            else { x = -100; y = Math.random() * canvas.height; }
+            zombies.push({ x, y, t: Math.random() * 100, ...type, maxHp: type.hp });
+        }
+
+        function startWave() {
+            crate.active = false;
+            msgEl.style.display = 'none';
+            if (wave % 5 === 0) {
+                msgEl.innerText = "BOSS ENCOUNTER INBOUND";
+                msgEl.style.display = 'block';
+                setTimeout(() => { if(!crate.active) msgEl.style.display = 'none'; }, 3000);
+                // Boss HP is much higher
+                zombies.push({ x: canvas.width / 2, y: -150, label: 'boss', hp: 2000 + (wave * 200), maxHp: 2000 + (wave * 200), speed: 1.0, damage: 35, radius: 70, lastSummon: Date.now(), t: 0 });
+            } else {
+                const count = 7 + (wave * 3); // More zombies per wave
+                for (let i = 0; i < count; i++) setTimeout(spawnZombie, i * 500); // Spawn faster
+            }
+        }
+
+        function update() {
+            if (!gameActive || paused) return;
+
+            if (keys['KeyW'] && player.y > 20) player.y -= player.speed;
+            if (keys['KeyS'] && player.y < canvas.height - 20) player.y += player.speed;
+            if (keys['KeyA'] && player.x > 20) player.x -= player.speed;
+            if (keys['KeyD'] && player.x < canvas.width - 20) player.x += player.speed;
+
+            let target = null, minDist = 2000;
+            zombies.forEach(z => {
+                let d = Math.hypot(z.x - player.x, z.y - player.y);
+                if (d < minDist) { minDist = d; target = z; }
+            });
+
+            if (target) {
+                player.barrelAngle = Math.atan2(target.y - player.y, target.x - player.x);
+                if (keys['Space'] && Date.now() - lastShot > gun.fireRate) {
+                    bullets.push({ x: player.x, y: player.y, vx: Math.cos(player.barrelAngle) * gun.bulletSpeed, vy: Math.sin(player.barrelAngle) * gun.bulletSpeed, life: gun.range / gun.bulletSpeed });
+                    lastShot = Date.now();
+                }
+            }
+
+            bullets.forEach((b, bi) => {
+                b.x += b.vx; b.y += b.vy; b.life--;
+                if (b.life <= 0) bullets.splice(bi, 1);
+                zombies.forEach((z, zi) => {
+                    if (Math.hypot(b.x - z.x, b.y - z.y) < z.radius) {
+                        z.hp -= gun.damage; bullets.splice(bi, 1);
+                        if (z.hp <= 0) {
+                            score += 100;
+                            document.getElementById('score').innerText = score;
+                            zombies.splice(zi, 1);
+                            checkWaveEnd();
+                        }
+                    }
+                });
+            });
+
+            zombies.forEach(z => {
+                let angle = Math.atan2(player.y - z.y, player.x - z.x);
+                z.x += Math.cos(angle) * z.speed; z.y += Math.sin(angle) * z.speed;
+                z.t += 0.15;
+                // Boss summons every 7 seconds now (Harder)
+                if (z.label === 'boss' && Date.now() - z.lastSummon > 7000) { 
+                    spawnZombie(true); spawnZombie(true); z.lastSummon = Date.now(); 
+                }
+                if (Math.hypot(player.x - z.x, player.y - z.y) < z.radius + 15) player.hp -= 0.6; // More damage
+            });
+
+            if (crate.active && Math.hypot(player.x - crate.x, player.y - crate.y) < 40) {
+                paused = true; document.getElementById('upgrade-menu').style.display = 'flex';
+            }
+        }
+
+        function checkWaveEnd() {
+            if (zombies.length === 0 && !crate.active) {
+                crate.active = true;
+                crate.x = Math.random() * (canvas.width - 200) + 100;
+                crate.y = Math.random() * (canvas.height - 200) + 100;
+                msgEl.innerText = "WAVE " + wave + " COMPLETE";
+                msgEl.style.display = 'block';
+                setTimeout(() => { if (crate.active) msgEl.style.display = 'none'; }, 3000);
+            }
+        }
+
+        function refreshUI() {
+            const cur = Math.max(0, player.hp);
+            hpBar.style.width = cur + "%";
+            hpText.innerText = Math.ceil(cur);
+            let color = cur > 60 ? '#2ecc71' : cur > 30 ? '#f1c40f' : '#e74c3c';
+            hpBar.style.backgroundColor = color;
+            hpText.style.color = color;
+            if (player.hp <= 0) { gameActive = false; alert("YOU DIED. WAVE: " + wave + " | SCORE: " + score); location.reload(); }
+        }
+
+        function draw() {
+            if (gameActive) refreshUI();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (crate.active) { 
+                ctx.fillStyle = '#e67e22'; ctx.fillRect(crate.x - 20, crate.y - 20, 40, 40); 
+                ctx.fillStyle = 'white'; ctx.font = "bold 14px Arial"; ctx.fillText("SUPPLY", crate.x - 25, crate.y - 30); 
+            }
+
+            zombies.forEach(z => {
+                const s = sprites[z.label];
+                const bounce = Math.sin(z.t) * 8;
+                ctx.save();
+                ctx.translate(z.x, z.y);
+                const hpPerc = z.hp / z.maxHp;
+                const zColor = hpPerc > 0.7 ? '#2ecc71' : hpPerc > 0.3 ? '#f1c40f' : '#e74c3c';
+                ctx.fillStyle = '#333'; ctx.fillRect(-z.radius, -z.radius - 20, z.radius * 2, 6);
+                ctx.fillStyle = zColor; ctx.fillRect(-z.radius, -z.radius - 20, (z.radius * 2) * hpPerc, 6);
+
+                if (spritesLoaded) ctx.drawImage(spriteSheet, s.sx, s.sy, s.sw, s.sh, -z.radius, -z.radius + bounce, z.radius * 2, z.radius * 2);
+                else { ctx.beginPath(); ctx.arc(0, bounce, z.radius, 0, Math.PI * 2); ctx.fillStyle = s.color; ctx.fill(); }
+                ctx.restore();
+            });
+
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.rotate(player.barrelAngle);
+            ctx.fillStyle = '#3498db'; ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#95a5a6'; ctx.fillRect(5, -6, 35, 12);
+            ctx.restore();
+
+            bullets.forEach(b => { ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill(); });
+
+            requestAnimationFrame(() => { update(); draw(); });
+        }
+
+        startWave();
+        draw();
+    </script>
+</body>
+</html>
